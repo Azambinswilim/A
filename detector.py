@@ -28,7 +28,12 @@ import time
 import cv2
 import numpy as np
 
-from constants import CAMERA_IMAGE_WIDTH, CAMERA_IMAGE_HEIGHT
+from constants import (
+    CAMERA_IMAGE_WIDTH, CAMERA_IMAGE_HEIGHT,
+    GATE_COLOR_HSV_LOW_1, GATE_COLOR_HSV_HIGH_1,
+    GATE_COLOR_HSV_LOW_2, GATE_COLOR_HSV_HIGH_2,
+)
+from shape_color_detector import detect_orange_gates
 
 # ─────────────────────────────────────────────────────────────
 #  الإعدادات
@@ -169,7 +174,7 @@ class OnnxBackend:
         boxes[:, [1, 3]] = boxes[:, [1, 3]].clip(0, CAMERA_IMAGE_HEIGHT)
 
         keep = nms(boxes, scores, IOU_THRESHOLD)
-        return [_pack(boxes[i], float(scores[i])) for i in keep]
+        return [_pack(boxes[i], float(scores[i]), img_bgr) for i in keep]
 
 
 class TorchBackend:
@@ -197,21 +202,78 @@ class TorchBackend:
         out = []
         for b in res.boxes:
             xyxy = b.xyxy[0].tolist()
-            out.append(_pack(np.array(xyxy), float(b.conf[0])))
+            out.append(_pack(np.array(xyxy), float(b.conf[0]), img_bgr))
         return out
 
 
-def _pack(xyxy, conf: float) -> dict:
+def _color_score(img_bgr: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> float:
+    """نسبة بكسلات الصندوق التي تقع ضمن مدى البرتقالي — يفرّق بين بوابة
+    حقيقية وأي مربع/جسم آخر يشبهها بالشكل لكن ليس بلونها."""
+    h_img, w_img = img_bgr.shape[:2]
+    xi1, yi1 = max(0, int(x1)), max(0, int(y1))
+    xi2, yi2 = min(w_img, int(x2)), min(h_img, int(y2))
+    if xi2 <= xi1 or yi2 <= yi1:
+        return 0.0
+
+    crop = img_bgr[yi1:yi2, xi1:xi2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    m1 = cv2.inRange(hsv, np.array(GATE_COLOR_HSV_LOW_1), np.array(GATE_COLOR_HSV_HIGH_1))
+    m2 = cv2.inRange(hsv, np.array(GATE_COLOR_HSV_LOW_2), np.array(GATE_COLOR_HSV_HIGH_2))
+    mask = cv2.bitwise_or(m1, m2)
+    return float(np.count_nonzero(mask)) / float(mask.size)
+
+
+def _pack(xyxy, conf: float, img_bgr: np.ndarray | None = None) -> dict:
     x1, y1, x2, y2 = [float(v) for v in xyxy]
     w, h = x2 - x1, y2 - y1
-    return {
+    d = {
         "x1": x1, "y1": y1, "x2": x2, "y2": y2,
         "cx": (x1 + x2) / 2.0,
         "cy": (y1 + y2) / 2.0,
         "w": w, "h": h,
         "area": (w * h) / (CAMERA_IMAGE_WIDTH * CAMERA_IMAGE_HEIGHT),
         "confidence": conf,
+        "shape": "unknown",
+        "source": "model",
     }
+    d["color_score"] = _color_score(img_bgr, x1, y1, x2, y2) if img_bgr is not None else 0.0
+    return d
+
+
+def _iou_xyxy(a: dict, b: dict) -> float:
+    xx1, yy1 = max(a["x1"], b["x1"]), max(a["y1"], b["y1"])
+    xx2, yy2 = min(a["x2"], b["x2"]), min(a["y2"], b["y2"])
+    inter = max(0.0, xx2 - xx1) * max(0.0, yy2 - yy1)
+    if inter <= 0.0:
+        return 0.0
+    area_a = (a["x2"] - a["x1"]) * (a["y2"] - a["y1"])
+    area_b = (b["x2"] - b["x1"]) * (b["y2"] - b["y1"])
+    return inter / (area_a + area_b - inter + 1e-9)
+
+
+def _merge_detections(model_dets: list[dict], color_dets: list[dict]) -> list[dict]:
+    """يدمج كشف النموذج مع الكشف الكلاسيكي بالألوان/الأشكال.
+
+    النموذج يتعرف على المربعات بثقة عالية لكنه يفوّت الحلقات الدائرية
+    غالباً (راجع رأس shape_color_detector.py). فحين يتفق الاثنان على نفس
+    الصندوق تقريباً نبقي كشف النموذج (أدق) وننسخ له تصنيف الشكل إن كان
+    مجهولاً؛ وحين لا يوجد تطابق (حالة الحلقة التي فاتت النموذج) نضيف كشف
+    الألوان كمرشّح مستقل بدل تجاهله."""
+    merged = list(model_dets)
+    for c in color_dets:
+        best_iou = 0.0
+        best_idx = -1
+        for i, m in enumerate(merged):
+            iou = _iou_xyxy(c, m)
+            if iou > best_iou:
+                best_iou, best_idx = iou, i
+        if best_iou > 0.3:
+            if merged[best_idx].get("shape") == "unknown":
+                merged[best_idx]["shape"] = c["shape"]
+            merged[best_idx]["color_score"] = max(merged[best_idx].get("color_score", 0.0), c["color_score"])
+        else:
+            merged.append(c)
+    return merged[:MAX_DETECTIONS]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -285,15 +347,25 @@ class GateDetector:
         return None
 
     def __call__(self, img_bgr: np.ndarray) -> list[dict]:
-        if self.backend is None:
-            return []
-
         t0 = time.perf_counter()
+
+        model_dets = []
+        if self.backend is not None:
+            try:
+                model_dets = self.backend.infer(img_bgr)
+            except Exception as e:
+                print(f"[DETECT] inference failed: {e}", flush=True)
+                model_dets = []
+
+        # الكاشف الكلاسيكي (لون + شكل) يعمل دائماً — لا يعتمد على النموذج،
+        # ويعوّض بوابات الحلقة الدائرية التي يفوّتها النموذج غالباً.
         try:
-            dets = self.backend.infer(img_bgr)
+            color_dets = detect_orange_gates(img_bgr)
         except Exception as e:
-            print(f"[DETECT] inference failed: {e}", flush=True)
-            return []
+            print(f"[DETECT] color/shape fallback failed: {e}", flush=True)
+            color_dets = []
+
+        dets = _merge_detections(model_dets, color_dets)
 
         ms = (time.perf_counter() - t0) * 1000.0
         self.infer_ms = ms
@@ -307,7 +379,9 @@ class GateDetector:
 
     @property
     def available(self) -> bool:
-        return self.backend is not None
+        # الكاشف الكلاسيكي بالألوان يعمل دائماً حتى بدون وزن النموذج،
+        # فالرؤية تبقى "متاحة" وإن كان النموذج مفقوداً.
+        return True
 
 
 # ─────────────────────────────────────────────────────────────

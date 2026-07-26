@@ -181,11 +181,13 @@ class VisionRX:
         self.infer_ms = det.infer_ms
         self.frames_processed += 1
 
-        # الأفضل = الأكبر مساحةً مع مكافأة الثقة (الأقرب عادةً هو الهدف)
+        # الأفضل = الأكبر مساحةً (الأقرب) مع مكافأة الثقة ومطابقة اللون
+        # البرتقالي — تُبعد أي جسم يشبه شكل البوابة لكنه ليس بلونها.
         best = None
         if detections:
             best = max(detections,
-                       key=lambda d: d["area"] * (0.6 + 0.4 * d["confidence"]))
+                       key=lambda d: d["area"] * (0.6 + 0.4 * d["confidence"])
+                                     * (0.5 + 0.5 * d.get("color_score", 0.0)))
 
         self.data["gate_detection"] = best
         self.data["gate_detections_all"] = detections
