@@ -28,12 +28,8 @@ import time
 import cv2
 import numpy as np
 
-from constants import (
-    CAMERA_IMAGE_WIDTH, CAMERA_IMAGE_HEIGHT,
-    GATE_COLOR_HSV_LOW_1, GATE_COLOR_HSV_HIGH_1,
-    GATE_COLOR_HSV_LOW_2, GATE_COLOR_HSV_HIGH_2,
-)
-from shape_color_detector import detect_orange_gates
+from constants import CAMERA_IMAGE_WIDTH, CAMERA_IMAGE_HEIGHT
+from shape_color_detector import detect_orange_gates, orange_mask
 
 # ─────────────────────────────────────────────────────────────
 #  الإعدادات
@@ -208,7 +204,8 @@ class TorchBackend:
 
 def _color_score(img_bgr: np.ndarray, x1: float, y1: float, x2: float, y2: float) -> float:
     """نسبة بكسلات الصندوق التي تقع ضمن مدى البرتقالي — يفرّق بين بوابة
-    حقيقية وأي مربع/جسم آخر يشبهها بالشكل لكن ليس بلونها."""
+    حقيقية وأي مربع/جسم آخر يشبهها بالشكل لكن ليس بلونها. يستخدم نفس
+    قناع shape_color_detector (مع تسوية الإضاءة) فلا يفترض إضاءة ثابتة."""
     h_img, w_img = img_bgr.shape[:2]
     xi1, yi1 = max(0, int(x1)), max(0, int(y1))
     xi2, yi2 = min(w_img, int(x2)), min(h_img, int(y2))
@@ -216,10 +213,7 @@ def _color_score(img_bgr: np.ndarray, x1: float, y1: float, x2: float, y2: float
         return 0.0
 
     crop = img_bgr[yi1:yi2, xi1:xi2]
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-    m1 = cv2.inRange(hsv, np.array(GATE_COLOR_HSV_LOW_1), np.array(GATE_COLOR_HSV_HIGH_1))
-    m2 = cv2.inRange(hsv, np.array(GATE_COLOR_HSV_LOW_2), np.array(GATE_COLOR_HSV_HIGH_2))
-    mask = cv2.bitwise_or(m1, m2)
+    mask = orange_mask(crop)
     return float(np.count_nonzero(mask)) / float(mask.size)
 
 

@@ -44,10 +44,21 @@ SQUARE_MAX_VERTICES = 5              # حواف الإطار المربع قد "
 SQUARE_MAX_ASPECT = 1.6              # نسبة طول/عرض أقصى لاعتباره مربعاً لا مستطيلاً عشوائياً
 
 _MORPH_KERNEL = np.ones((5, 5), np.uint8)
+_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 
-def _orange_mask(img_bgr: np.ndarray) -> np.ndarray:
+def orange_mask(img_bgr: np.ndarray) -> np.ndarray:
+    """قناع ثنائي للون البرتقالي — مستقل عن محتوى/إضاءة ما وراء البوابة.
+
+    كل عالم/مستوى بالمحاكي له إضاءة مختلفة (وما بداخل فتحة البوابة يتغير
+    كلياً حسب تصميم المستوى)، فنطبّق تسوية تباين محلية (CLAHE) على قناة
+    الإضاءة V قبل العتبة — يقرّب فرق ألوان الغامق/الفاتح بين المستويات
+    فيصير مدى HSV واحد يشتغل عبر إضاءات مختلفة بدل معايرة لكل عالم."""
     hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    v = _CLAHE.apply(v)
+    hsv = cv2.merge((h, s, v))
+
     m1 = cv2.inRange(hsv, np.array(GATE_COLOR_HSV_LOW_1), np.array(GATE_COLOR_HSV_HIGH_1))
     m2 = cv2.inRange(hsv, np.array(GATE_COLOR_HSV_LOW_2), np.array(GATE_COLOR_HSV_HIGH_2))
     mask = cv2.bitwise_or(m1, m2)
@@ -87,7 +98,7 @@ def detect_orange_gates(img_bgr: np.ndarray) -> list[dict]:
     يكتشف بوابات (مربعة أو حلقية) برتقالية اللون بمعالجة صورة كلاسيكية.
     يرجّع نفس قاموس detector._pack زائداً "shape" و "color_score".
     """
-    mask = _orange_mask(img_bgr)
+    mask = orange_mask(img_bgr)
     contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None:
         return []

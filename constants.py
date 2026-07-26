@@ -28,10 +28,13 @@ PHYSICS_HZ = 120
 # --- Gate color (Section 3.4: gates are painted safety-orange, both the
 #     square-frame gates and the circular ring/hoop gates) ---
 # HSV bounds (OpenCV H: 0-179, S/V: 0-255). Two bands because "orange" in
-# HSV can sit close to the red wrap-around depending on lighting.
-GATE_COLOR_HSV_LOW_1  = (5, 120, 90)
+# HSV can sit close to the red wrap-around depending on lighting. Kept
+# deliberately loose on S/V — different worlds/levels light the gates
+# differently, and we normalize brightness (CLAHE) before thresholding
+# anyway, so hue is the only value that has to be trustworthy.
+GATE_COLOR_HSV_LOW_1  = (5, 80, 50)
 GATE_COLOR_HSV_HIGH_1 = (22, 255, 255)
-GATE_COLOR_HSV_LOW_2  = (0, 120, 90)
+GATE_COLOR_HSV_LOW_2  = (0, 80, 50)
 GATE_COLOR_HSV_HIGH_2 = (4, 255, 255)
 
 # Minimum blob area (in px, at native 640x360) for the classical
